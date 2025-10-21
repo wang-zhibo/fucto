@@ -3,14 +3,59 @@ import json
 import requests
 import websockets
 import uuid
+import threading
+from typing import Optional, List, Dict, Any
+from pathlib import Path
 # ========== ⚙️ 配置区 ==========
 # cookies需要手动获取，登录后找到https://clerk.cto.new/v1/client/sessions/sess...请求的请求头，复制其中的cookies，以【__client=】开头
-COOKIES = ""
+
+COOKIES_FILE = Path(__file__).with_name("cookies.txt")
+_cookie_lock = threading.Lock()
+_cookie_pool: List[str] = []
+_cookie_index = 0
+_cookie_mtime: Optional[float] = None
+# COOKIES = COOKIES_FILE.read_text().strip()
 AUTO_NEW_CHAT = True  # True=每次新建对话；False=复用上次 chat_id
 CHAT_ID_CACHE_FILE = "chat_id.txt"
 # ADAPTER = "ClaudeSonnet4_5"
 ADAPTER = "GPT5"
 # ==============================
+
+
+def _load_cookie_pool() -> None:
+    """Load cookie list from disk and reset round-robin index."""
+    global _cookie_pool, _cookie_index, _cookie_mtime
+    try:
+        current_mtime = COOKIES_FILE.stat().st_mtime
+        raw_lines = COOKIES_FILE.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Cookie file not found: {COOKIES_FILE}") from exc
+
+    cookies = [line.strip() for line in raw_lines if line.strip() and not line.strip().startswith("#")]
+    if not cookies:
+        raise RuntimeError(f"No cookies defined in {COOKIES_FILE}")
+
+    _cookie_pool = cookies
+    _cookie_index = 0
+    _cookie_mtime = current_mtime
+
+
+def get_cookie() -> str:
+    """Return next cookie using round-robin rotation."""
+    global _cookie_index
+    with _cookie_lock:
+        try:
+            current_mtime = COOKIES_FILE.stat().st_mtime
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"Cookie file not found: {COOKIES_FILE}") from exc
+
+        if not _cookie_pool or _cookie_mtime != current_mtime:
+            _load_cookie_pool()
+
+        cookie = _cookie_pool[_cookie_index]
+        _cookie_index = (_cookie_index + 1) % len(_cookie_pool)
+        return cookie
+
 
 
 def get_clerk_info():
@@ -25,9 +70,12 @@ def get_clerk_info():
         "__clerk_api_version": "2025-04-10",
         "_clerk_js_version": "5.102.0",
     }
+    
+    cookie = get_cookie()
+
     headers = {
         "accept": "application/json",
-        "cookie": COOKIES,
+        "cookie": cookie,
         "user-agent": "Mozilla/5.0",
     }
 
@@ -51,10 +99,11 @@ def get_jwt_from_clerk(session_id):
         f"https://clerk.cto.new/v1/client/sessions/{session_id}/tokens"
         "?__clerk_api_version=2025-04-10&_clerk_js_version=5.101.1"
     )
+    cookie = get_cookie()
     headers = {
         "accept": "application/json",
         "content-type": "application/x-www-form-urlencoded",
-        "cookie": COOKIES,
+        "cookie": cookie,
         "user-agent": "Mozilla/5.0",
     }
     r = requests.post(url, headers=headers, data={})
